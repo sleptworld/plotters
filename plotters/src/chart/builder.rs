@@ -1,7 +1,8 @@
 use super::context::ChartContext;
 
-use crate::coord::cartesian::{Cartesian2d, Cartesian3d};
+use crate::coord::cartesian::{Cartesian2d, Cartesian3d, LatLonCoord, ProjectionS};
 use crate::coord::ranged1d::AsRangedCoord;
+use crate::coord::CoordTranslate;
 use crate::coord::Shift;
 
 use crate::drawing::{DrawingArea, DrawingAreaErrorKind};
@@ -430,6 +431,147 @@ impl<'a, 'b, DB: DrawingBackend> ChartBuilder<'a, 'b, DB> {
                 x_spec,
                 y_spec,
                 pixel_range,
+            )),
+            series_anno: vec![],
+            drawing_area_pos: (
+                actual_drawing_area_pos[2] + title_dx + self.margin[2] as i32,
+                actual_drawing_area_pos[0] + title_dy + self.margin[0] as i32,
+            ),
+        })
+    }
+
+    /**
+    Builds a chart with a Geo coordinate system.
+
+    - `x_spec`: Specifies the X axis range and data properties
+    - `y_spec`: Specifies the Y axis range and data properties
+    - Returns: A `ChartContext` object, ready to visualize data.
+
+    See [`ChartBuilder::on()`] and [`ChartContext::configure_mesh()`] for more information and examples.
+    */
+    pub fn build_geo_coord<T: ProjectionS>(
+        &mut self,
+        lon: Option<(f64, f64)>,
+        lat: Option<(f64, f64)>,
+        proj: T,
+    ) -> Result<ChartContext<'a, DB, LatLonCoord<T>>, DrawingAreaErrorKind<DB::ErrorType>> {
+        let mut label_areas = [None, None, None, None];
+
+        let mut drawing_area = DrawingArea::clone(self.root_area);
+
+        if *self.margin.iter().max().unwrap_or(&0) > 0 {
+            drawing_area = drawing_area.margin(
+                self.margin[0] as i32,
+                self.margin[1] as i32,
+                self.margin[2] as i32,
+                self.margin[3] as i32,
+            );
+        }
+
+        let (title_dx, title_dy) = if let Some((ref title, ref style)) = self.title {
+            let (origin_dx, origin_dy) = drawing_area.get_base_pixel();
+            drawing_area = drawing_area.titled(title, style.clone())?;
+            let (current_dx, current_dy) = drawing_area.get_base_pixel();
+            (current_dx - origin_dx, current_dy - origin_dy)
+        } else {
+            (0, 0)
+        };
+
+        let (w, h) = drawing_area.dim_in_pixel();
+
+        let mut actual_drawing_area_pos = [0, h as i32, 0, w as i32];
+
+        const DIR: [(i16, i16); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+
+        for (idx, (dx, dy)) in (0..4).map(|idx| (idx, DIR[idx])) {
+            if self.overlap_plotting_area[idx] {
+                continue;
+            }
+
+            let size = self.label_area_size[idx] as i32;
+
+            let split_point = if dx + dy < 0 { size } else { -size };
+
+            actual_drawing_area_pos[idx] += split_point;
+        }
+
+        // Now the root drawing area is to be split into
+        //
+        // +----------+------------------------------+------+
+        // |    0     |    1 (Top Label Area)        |   2  |
+        // +----------+------------------------------+------+
+        // |    3     |                              |   5  |
+        // |  Left    |       4 (Plotting Area)      | Right|
+        // |  Labels  |                              | Label|
+        // +----------+------------------------------+------+
+        // |    6     |        7 (Bottom Labels)     |   8  |
+        // +----------+------------------------------+------+
+
+        let mut split: Vec<_> = drawing_area
+            .split_by_breakpoints(
+                &actual_drawing_area_pos[2..4],
+                &actual_drawing_area_pos[0..2],
+            )
+            .into_iter()
+            .map(Some)
+            .collect();
+
+        // Take out the plotting area
+        std::mem::swap(&mut drawing_area, split[4].as_mut().unwrap());
+
+        // Initialize the label areas - since the label area might be overlapping
+        // with the plotting area, in this case, we need handle them differently
+        for (src_idx, dst_idx) in [1, 7, 3, 5].iter().zip(0..4) {
+            if !self.overlap_plotting_area[dst_idx] {
+                let (h, w) = split[*src_idx].as_ref().unwrap().dim_in_pixel();
+                if h > 0 && w > 0 {
+                    std::mem::swap(&mut label_areas[dst_idx], &mut split[*src_idx]);
+                }
+            } else if self.label_area_size[dst_idx] != 0 {
+                let size = self.label_area_size[dst_idx] as i32;
+                let (dw, dh) = drawing_area.dim_in_pixel();
+                let x0 = if DIR[dst_idx].0 > 0 {
+                    dw as i32 - size
+                } else {
+                    0
+                };
+                let y0 = if DIR[dst_idx].1 > 0 {
+                    dh as i32 - size
+                } else {
+                    0
+                };
+                let x1 = if DIR[dst_idx].0 >= 0 { dw as i32 } else { size };
+                let y1 = if DIR[dst_idx].1 >= 0 { dh as i32 } else { size };
+
+                label_areas[dst_idx] = Some(
+                    drawing_area
+                        .clone()
+                        .shrink((x0, y0), ((x1 - x0), (y1 - y0))),
+                );
+            }
+        }
+
+        let mut pixel_range = drawing_area.get_pixel_range();
+        pixel_range.0.end -= 1;
+        pixel_range.1.end -= 1;
+        pixel_range.1 = pixel_range.1.end..pixel_range.1.start;
+
+        let mut x_label_area = [None, None];
+        let mut y_label_area = [None, None];
+
+        std::mem::swap(&mut x_label_area[0], &mut label_areas[0]);
+        std::mem::swap(&mut x_label_area[1], &mut label_areas[1]);
+        std::mem::swap(&mut y_label_area[0], &mut label_areas[2]);
+        std::mem::swap(&mut y_label_area[1], &mut label_areas[3]);
+
+        Ok(ChartContext {
+            x_label_area,
+            y_label_area,
+            drawing_area: drawing_area.apply_coord_spec(LatLonCoord::new(
+                lon,
+                lat,
+                pixel_range,
+                proj,
             )),
             series_anno: vec![],
             drawing_area_pos: (

@@ -15,6 +15,8 @@ exclude = ["doc-template", "plotters-doc-data"]
 [dependencies]
 num-traits = "0.2.14"
 chrono = { version = "0.4.20", optional = true }
+thiserror = "1.0.40"
+proj = "0.27.0"
 
 [dependencies.plotters-backend]
 path = "../plotters-backend"
@@ -63,15 +65,7 @@ features = [
 ]
 
 [features]
-default = [
-        "bitmap_backend", "bitmap_encoder", "bitmap_gif",
-        "svg_backend",
-        "chrono",
-        "ttf",
-        "image",
-        "deprecated_items",  "all_series", "all_elements",
-        "full_palette"
-]
+default = ["bitmap_backend", "bitmap_encoder", "bitmap_gif", "svg_backend", "chrono", "ttf", "image", "deprecated_items", "all_series", "all_elements", "full_palette"]
 all_series = ["area_series", "line_series", "point_series", "surface_series"]
 all_elements = ["errorbar", "candlestick", "boxplot", "histogram"]
 
